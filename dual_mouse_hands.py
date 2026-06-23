@@ -26,10 +26,13 @@ Gestures
     to (none) until mapped. Each row
     maps to vertical wheel, horizontal wheel, Ctrl+wheel zoom, volume keys,
     Ctrl+Tab / Ctrl+Shift+Tab, Win+Tab, Win+D (show desktop), split/merge, profile
-    slot, warps, or (none). Warp gestures: in split, Warp 1st merges at the
-    current primary; Warp 2nd moves the primary to the 2nd cursor then merges.
-    In merged / merged-shift, Warp 1st warps to the point saved with “pin 1st”
-    and Warp 2nd warps to the point saved with “pin 2nd” (both set in split).
+    slot, warps, or (none).     Warp / pin model: two invisible saved points — “3rd cursor” (pin 2nd / warp 2nd
+    in merged) and “4th cursor” (pin 1st / warp 1st in merged). Pin 2nd stores the
+    3rd at the 2nd cursor (split) or at the merged cursor (merged). Pin 1st stores
+    the 4th at the primary (split) or merged cursor (merged). Warp 1st in split moves
+    both logical cursors to the primary and merges; Warp 2nd in split moves to the
+    2nd cursor and merges. In merged mode, Warp 1st / 2nd jump the cursor to the
+    4th / 3rd saved point respectively.
     Gestures work in merged or split mode. Merged / merged-shift keep North–South
     scroll and split-toggle on the first rows and set compass pairs (e.g. East–North
     volume up, West–South show desktop). Split defaults East–East / West–West to
@@ -52,18 +55,28 @@ Sensitivity
 
 Top toggles
     split/merge and duo shift are checkboxes. Standard push buttons below them
-    include merge/warp, pin, 2nd right/middle/ultimate (placeholders). “2nd Left
-    Click” is momentary: while held in split mode with a 2nd cursor, it moves the
-    primary pointer to the 2nd cursor, holds the left button down, then on release
-    releases the button and restores the primary pointer to its pre-warp position.
+    include merge/warp, pin, 2nd left/right/middle, and ultimate (placeholder).
+    “2nd Left/Right/Middle Click” share the same rules: in merged / merged-shift a
+    normal click at the system cursor; in split / split-shift warp to the ghost,
+    press the chosen button, track with the secondary mouse while held, release and
+    restore the primary. “ultimate” remains a placeholder.
+
+    F15–F24 are handled via a system-wide low-level keyboard hook: they mirror the
+    same ten controls even when this window is not focused (other apps will not
+    receive those function keys while CC-Duo is running). F15/F16 toggle split/merge
+    and duo shift; F17–F24 press the eight pushbuttons on key-down and release on
+    key-up (pin actions on release, matching mouse-up BN_CLICKED). Minimizing or
+    using only the taskbar is optional UX; global F-keys do not require it.
 
 Limits
     Wheel and extra-button events from the 2nd device may still go to whatever
     is under the primary cursor; only movement is fully separated.
 
-Run: python dual_mouse_hands.py — exit via closing the window or Ctrl+C in the
-terminal. 2nd-cursor size applies on leaving the size field; color applies from
-the picker on OK.
+Run: python dual_mouse_hands.py — a notification-area (tray) icon stays running;
+use the tray menu Exit or close from the console to quit. The main window hides
+to the tray when minimized or closed (×); double-click the tray icon or choose
+Open to show it again. 2nd-cursor size applies on leaving the size field; color
+applies from the picker on OK.
 """
 
 from __future__ import annotations
@@ -114,12 +127,25 @@ WM_TIMER = 0x0113
 WM_NCHITTEST = 0x0084
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 WM_CAPTURECHANGED = 0x0215
 WM_CTLCOLORSTATIC = 0x0138
 HTTRANSPARENT = -1
 WM_APP = 0x8000
 # Posted from ChooseColor hook so we read rgbResult after the dialog updates it.
 WM_GHOST_COLOR_SYNC = WM_APP + 120
+# Posted from WH_KEYBOARD_LL: wParam = VK, lParam 0 = down / 1 = up.
+WM_CCOS_FKEY = WM_APP + 121
+# Tray icon (Shell_NotifyIcon callback).
+WM_TRAY_CALLBACK = WM_APP + 115
+
+WH_KEYBOARD_LL = 13
+HC_ACTION = 0
+LLKHF_INJECTED = 0x10
+LLKHF_UP = 0x80
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
 
 BN_CLICKED = 0
 
@@ -131,8 +157,21 @@ BS_GROUPBOX = 0x00000007
 
 BM_GETCHECK = 0x00F0
 BM_SETCHECK = 0x00F1
+BM_SETSTATE = 0x00F3
+BM_CLICK = 0x00F5
 BST_UNCHECKED = 0
 BST_CHECKED = 1
+
+VK_F15 = 0x7E
+VK_F16 = 0x7F
+VK_F17 = 0x80
+VK_F18 = 0x81
+VK_F19 = 0x82
+VK_F20 = 0x83
+VK_F21 = 0x84
+VK_F22 = 0x85
+VK_F23 = 0x86
+VK_F24 = 0x87
 
 IDC_TOGGLE_POINTERS = 1001
 IDC_GHOST_SIZE_EDIT = 1002
@@ -179,13 +218,28 @@ IDC_GESTURE_WEST_SOUTH = 1043
 IDC_SENS_PROFILE_GESTURE_COOLDOWN_EDIT = 1044
 IDC_RING_ANIMATIONS_TOGGLE = 1045
 
-PLACEHOLDER_TOGGLE_IDCS: tuple[int, ...] = (
-    IDC_MERGE_WARP_FIRST,
-    IDC_MERGE_WARP_SECOND,
-    IDC_SECOND_RIGHT_CLICK,
-    IDC_SECOND_MIDDLE_CLICK,
-    IDC_ULTIMATE_TOGGLE,
+# CCOS Inputs group: F15–F24 when the main window or a child has focus.
+CCOS_FKEY_TO_IDC: dict[int, int] = {
+    VK_F15: IDC_TOGGLE_POINTERS,
+    VK_F16: IDC_DUO_SHIFT_TOGGLE,
+    VK_F17: IDC_MERGE_WARP_FIRST,
+    VK_F18: IDC_MERGE_WARP_SECOND,
+    VK_F19: IDC_PIN_FIRST,
+    VK_F20: IDC_PIN_SECOND,
+    VK_F21: IDC_SECOND_LEFT_CLICK,
+    VK_F22: IDC_SECOND_RIGHT_CLICK,
+    VK_F23: IDC_SECOND_MIDDLE_CLICK,
+    VK_F24: IDC_ULTIMATE_TOGGLE,
+}
+CCOS_FKEY_CHECKBOX_IDCS: frozenset[int] = frozenset(
+    (IDC_TOGGLE_POINTERS, IDC_DUO_SHIFT_TOGGLE)
 )
+# BS_PUSHBUTTON still uses WM_LBUTTONDOWN/UP for activation (including F-key synth).
+CCOS_FKEY_SECOND_GHOST_BTN_IDCS: frozenset[int] = frozenset(
+    (IDC_SECOND_LEFT_CLICK, IDC_SECOND_RIGHT_CLICK, IDC_SECOND_MIDDLE_CLICK)
+)
+
+PLACEHOLDER_TOGGLE_IDCS: tuple[int, ...] = (IDC_ULTIMATE_TOGGLE,)
 PLACEHOLDER_TOGGLE_INDEX: dict[int, int] = {
     idc: i for i, idc in enumerate(PLACEHOLDER_TOGGLE_IDCS)
 }
@@ -392,6 +446,10 @@ def profile_idx_from_flags(split: bool, duo_shift_on: bool) -> int:
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x1000
 WHEEL_DELTA = 120
@@ -437,7 +495,31 @@ WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
 
 SW_HIDE = 0
+SW_SHOW = 5
+SW_RESTORE = 9
 SW_SHOWNOACTIVATE = 4
+
+WM_CLOSE = 0x0010
+WM_SYSCOMMAND = 0x0112
+SC_MINIMIZE = 0xF020
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONUP = 0x0205
+
+NIM_ADD = 0
+NIM_DELETE = 2
+NIF_MESSAGE = 0x00000001
+NIF_ICON = 0x00000002
+NIF_TIP = 0x00000004
+
+TPM_RIGHTBUTTON = 0x0002
+TPM_BOTTOMALIGN = 0x0020
+MF_STRING = 0x0000
+MF_ENABLED = 0x0000
+
+IDI_APPLICATION = 32512
+TRAY_ICON_ID = 1
+IDM_TRAY_OPEN = 3001
+IDM_TRAY_EXIT = 3002
 
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -565,6 +647,36 @@ class RAWINPUT_UNION(ctypes.Union):
 
 class RAWINPUT(ctypes.Structure):
     _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUT_UNION)]
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_ulonglong),
+    ]
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", wintypes.HANDLE),
+        ("szTip", wintypes.WCHAR * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", wintypes.WCHAR * 256),
+        ("uVersion", wintypes.UINT),
+        ("szInfoTitle", wintypes.WCHAR * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", ctypes.c_byte * 16),
+        ("hBalloonIcon", wintypes.HANDLE),
+    ]
 
 
 class POINT(ctypes.Structure):
@@ -750,6 +862,37 @@ user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = wintypes.BOOL
 
+user32.CreatePopupMenu.argtypes = []
+user32.CreatePopupMenu.restype = wintypes.HMENU
+user32.AppendMenuW.argtypes = [
+    wintypes.HMENU,
+    wintypes.UINT,
+    ctypes.c_size_t,
+    wintypes.LPCWSTR,
+]
+user32.AppendMenuW.restype = wintypes.BOOL
+user32.TrackPopupMenu.argtypes = [
+    wintypes.HMENU,
+    wintypes.UINT,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.HWND,
+    ctypes.c_void_p,
+]
+user32.TrackPopupMenu.restype = wintypes.BOOL
+user32.DestroyMenu.argtypes = [wintypes.HMENU]
+user32.DestroyMenu.restype = wintypes.BOOL
+user32.LoadIconW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
+user32.LoadIconW.restype = wintypes.HANDLE
+
+shell32 = ctypes.windll.shell32
+shell32.Shell_NotifyIconW.argtypes = [
+    wintypes.DWORD,
+    ctypes.POINTER(NOTIFYICONDATAW),
+]
+shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
 kernel32.GetCurrentThreadId.argtypes = []
 kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
@@ -850,6 +993,28 @@ user32.SendMessageW.argtypes = [
     wintypes.LPARAM,
 ]
 user32.SendMessageW.restype = wintypes.LRESULT
+
+user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
+user32.IsChild.restype = wintypes.BOOL
+
+user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wintypes.HINSTANCE,
+    wintypes.DWORD,
+]
+user32.SetWindowsHookExW.restype = ctypes.c_void_p
+
+user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+
+user32.CallNextHookEx.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_int,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+]
+user32.CallNextHookEx.restype = wintypes.LRESULT
 
 user32.PostMessageW.argtypes = [
     wintypes.HWND,
@@ -988,6 +1153,46 @@ def inject_mouse_left_down() -> None:
 def inject_mouse_left_up() -> None:
     user32.mouse_event(
         MOUSEEVENTF_LEFTUP,
+        0,
+        0,
+        0,
+        ctypes.c_ulonglong(0),
+    )
+
+
+def inject_mouse_right_down() -> None:
+    user32.mouse_event(
+        MOUSEEVENTF_RIGHTDOWN,
+        0,
+        0,
+        0,
+        ctypes.c_ulonglong(0),
+    )
+
+
+def inject_mouse_right_up() -> None:
+    user32.mouse_event(
+        MOUSEEVENTF_RIGHTUP,
+        0,
+        0,
+        0,
+        ctypes.c_ulonglong(0),
+    )
+
+
+def inject_mouse_middle_down() -> None:
+    user32.mouse_event(
+        MOUSEEVENTF_MIDDLEDOWN,
+        0,
+        0,
+        0,
+        ctypes.c_ulonglong(0),
+    )
+
+
+def inject_mouse_middle_up() -> None:
+    user32.mouse_event(
+        MOUSEEVENTF_MIDDLEUP,
         0,
         0,
         0,
@@ -2025,7 +2230,7 @@ def main() -> int:
     }
     split_merge_gesture_cooldown_until = [0.0]
     warp_gesture_cooldown_until = [0.0]
-    # Fixed screen points set in split; used by Warp 2nd / Warp 1st in merged / merged-shift.
+    # Invisible “3rd cursor” (pin 2nd / merged Warp 2nd) and “4th cursor” (pin 1st / merged Warp 1st).
     pinned_sec_warp_point: list[tuple[int, int] | None] = [None]
     pinned_pri_warp_point: list[tuple[int, int] | None] = [None]
     # After switching profile slot: ignore dual-mice gesture patterns (see
@@ -2298,18 +2503,7 @@ def main() -> int:
                 if now_w < float(warp_gesture_cooldown_until[0]):
                     return
                 warp_gesture_cooldown_until[0] = now_w + 0.65
-                if dual_enabled[0]:
-                    if config_hwnd:
-                        finish_split_merge_profile_transition(config_hwnd, False)
-                else:
-                    pin_pt = pinned_pri_warp_point[0]
-                    if pin_pt is None:
-                        return
-                    wx, wy = pin_pt
-                    ptr_state["p_pri"] = (wx, wy)
-                    user32.SetCursorPos(int(wx), int(wy))
-                    if config_hwnd:
-                        merge_snap_anim_begin(config_hwnd, int(wx), int(wy))
+                warp_first_execute(config_hwnd)
             elif action == GESTURE_WARP_SECOND_ITEM:
                 now_w2 = time.perf_counter()
                 if mag < float(DUAL_HZOOM_MIN_DX):
@@ -2317,23 +2511,7 @@ def main() -> int:
                 if now_w2 < float(warp_gesture_cooldown_until[0]):
                     return
                 warp_gesture_cooldown_until[0] = now_w2 + 0.65
-                if dual_enabled[0]:
-                    if ptr_state["p_sec"] is None:
-                        return
-                    sx, sy = ptr_state["p_sec"]
-                    ptr_state["p_pri"] = (sx, sy)
-                    user32.SetCursorPos(int(sx), int(sy))
-                    if config_hwnd:
-                        finish_split_merge_profile_transition(config_hwnd, False)
-                else:
-                    pin_pt = pinned_sec_warp_point[0]
-                    if pin_pt is None:
-                        return
-                    wx, wy = pin_pt
-                    ptr_state["p_pri"] = (wx, wy)
-                    user32.SetCursorPos(int(wx), int(wy))
-                    if config_hwnd:
-                        merge_snap_anim_begin(config_hwnd, int(wx), int(wy))
+                warp_second_execute(config_hwnd)
 
         # Vertical row gestures only on vertical-dominant packets. Using only
         # "not horizontal_dom" lets both axes run when neither dominates (tiny
@@ -2783,6 +2961,12 @@ def main() -> int:
         wintypes.WPARAM,
         wintypes.LPARAM,
     )
+    HOOKPROC_LL = ctypes.WINFUNCTYPE(
+        wintypes.LRESULT,
+        ctypes.c_int,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    )
 
     def ghost_wnd_proc(hwnd, msg, wparam, lparam):
         # Visuals come from UpdateLayeredWindow, not GDI painting.
@@ -3121,6 +3305,46 @@ def main() -> int:
             split_snap_anim_begin(parent_hwnd)
             sync_secondary_overlay()
 
+    def warp_first_execute(parent_hwnd: int | None) -> None:
+        """Warp 1st: split → move to primary then merge; merged → jump to 4th invisible pin."""
+        if dual_enabled[0]:
+            if ptr_state["p_pri"] is None:
+                return
+            px, py = ptr_state["p_pri"]
+            user32.SetCursorPos(int(px), int(py))
+            ptr_state["p_sec"] = (int(px), int(py))
+            if parent_hwnd:
+                finish_split_merge_profile_transition(parent_hwnd, False)
+        else:
+            pin_pt = pinned_pri_warp_point[0]
+            if pin_pt is None:
+                return
+            wx, wy = pin_pt
+            ptr_state["p_pri"] = (wx, wy)
+            user32.SetCursorPos(int(wx), int(wy))
+            if parent_hwnd:
+                merge_snap_anim_begin(parent_hwnd, int(wx), int(wy))
+
+    def warp_second_execute(parent_hwnd: int | None) -> None:
+        """Warp 2nd: split → move primary to 2nd cursor then merge; merged → jump to 3rd pin."""
+        if dual_enabled[0]:
+            if ptr_state["p_sec"] is None:
+                return
+            sx, sy = ptr_state["p_sec"]
+            ptr_state["p_pri"] = (int(sx), int(sy))
+            user32.SetCursorPos(int(sx), int(sy))
+            if parent_hwnd:
+                finish_split_merge_profile_transition(parent_hwnd, False)
+        else:
+            pin_pt = pinned_sec_warp_point[0]
+            if pin_pt is None:
+                return
+            wx, wy = pin_pt
+            ptr_state["p_pri"] = (wx, wy)
+            user32.SetCursorPos(int(wx), int(wy))
+            if parent_hwnd:
+                merge_snap_anim_begin(parent_hwnd, int(wx), int(wy))
+
     def refresh_sensitivity_edits(parent_hwnd: int) -> None:
         pairs = (
             (IDC_SENS_MOVE_PRIMARY_EDIT, "move_primary_pct", DEFAULT_SENSITIVITY_PCT),
@@ -3299,58 +3523,310 @@ def main() -> int:
         ghost_overlay_cache["side"] = None
         sync_secondary_overlay()
 
-    second_left_drag: dict[str, object] = {
-        "active": False,
-        "saved": None,
-        "old_proc": 0,
-    }
+    def pin_first_clicked(parent_hwnd: int) -> None:
+        """4th invisible cursor: primary (split) or current merged cursor."""
+        if dual_enabled[0]:
+            if ptr_state["p_pri"] is None:
+                return
+            px, py = ptr_state["p_pri"]
+        else:
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            px, py = int(pt.x), int(pt.y)
+        pinned_pri_warp_point[0] = (int(px), int(py))
+        merge_snap_anim_begin(parent_hwnd, int(px), int(py))
 
-    def _finish_second_left_click_drag() -> None:
-        if not second_left_drag["active"]:
+    def pin_second_clicked(parent_hwnd: int) -> None:
+        """3rd invisible cursor: 2nd cursor (split) or current merged cursor."""
+        if dual_enabled[0]:
+            if ptr_state["p_sec"] is None:
+                return
+            sx, sy = ptr_state["p_sec"]
+        else:
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            sx, sy = int(pt.x), int(pt.y)
+        pinned_sec_warp_point[0] = (int(sx), int(sy))
+        merge_snap_anim_begin(parent_hwnd, int(sx), int(sy))
+
+    second_ghost_btn_drag: dict[str, object] = {
+        "active": False,
+        "button": None,
+        "saved": None,
+        "merged_click": False,
+        "old_proc": {
+            IDC_SECOND_LEFT_CLICK: 0,
+            IDC_SECOND_RIGHT_CLICK: 0,
+            IDC_SECOND_MIDDLE_CLICK: 0,
+        },
+    }
+    ccos_fkey_physical_down: set[int] = set()
+    ccos_hotkey_target: list[int] = [0]
+    keyboard_ll_hook: list[ctypes.c_void_p | None] = [None]
+    keyboard_ll_proc_keepalive: list[object] = [None]
+
+    def dispatch_ccos_fkey(hwnd: int, vk: int, is_keyup: bool) -> None:
+        idc_cc = CCOS_FKEY_TO_IDC.get(vk)
+        if idc_cc is None:
             return
-        inject_mouse_left_up()
-        sav = second_left_drag["saved"]
+        if idc_cc in CCOS_FKEY_CHECKBOX_IDCS:
+            if is_keyup:
+                ccos_fkey_physical_down.discard(vk)
+                return
+            if vk in ccos_fkey_physical_down:
+                return
+            ccos_fkey_physical_down.add(vk)
+            cbtn = user32.GetDlgItem(hwnd, idc_cc)
+            if cbtn:
+                user32.SendMessageW(cbtn, BM_CLICK, 0, 0)
+            return
+        if not is_keyup:
+            if vk in ccos_fkey_physical_down:
+                return
+            ccos_fkey_physical_down.add(vk)
+            btn_cc = user32.GetDlgItem(hwnd, idc_cc)
+            if btn_cc:
+                user32.SendMessageW(btn_cc, BM_SETSTATE, 1, 0)
+                if idc_cc in CCOS_FKEY_SECOND_GHOST_BTN_IDCS:
+                    user32.SendMessageW(
+                        btn_cc,
+                        WM_LBUTTONDOWN,
+                        1,
+                        wintypes.LPARAM((11 << 16) | 8),
+                    )
+            return
+        if vk not in ccos_fkey_physical_down:
+            return
+        ccos_fkey_physical_down.discard(vk)
+        btn_cc = user32.GetDlgItem(hwnd, idc_cc)
+        if btn_cc:
+            user32.SendMessageW(btn_cc, BM_SETSTATE, 0, 0)
+            if idc_cc in CCOS_FKEY_SECOND_GHOST_BTN_IDCS:
+                user32.SendMessageW(
+                    btn_cc,
+                    WM_LBUTTONUP,
+                    0,
+                    wintypes.LPARAM((11 << 16) | 8),
+                )
+        if idc_cc == IDC_PIN_FIRST:
+            pin_first_clicked(hwnd)
+        elif idc_cc == IDC_PIN_SECOND:
+            pin_second_clicked(hwnd)
+        elif idc_cc == IDC_MERGE_WARP_FIRST:
+            warp_first_execute(hwnd)
+        elif idc_cc == IDC_MERGE_WARP_SECOND:
+            warp_second_execute(hwnd)
+
+    def _ccos_ll_keyboard_hook(n_code: int, w_param: int, l_param: int) -> int:
+        if n_code < 0:
+            return int(
+                user32.CallNextHookEx(
+                    keyboard_ll_hook[0], n_code, w_param, l_param
+                )
+            )
+        if n_code != HC_ACTION:
+            return int(
+                user32.CallNextHookEx(
+                    keyboard_ll_hook[0], n_code, w_param, l_param
+                )
+            )
+        kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+        if kb.flags & LLKHF_INJECTED:
+            return int(
+                user32.CallNextHookEx(
+                    keyboard_ll_hook[0], n_code, w_param, l_param
+                )
+            )
+        vk = int(kb.vkCode) & 0xFF
+        if VK_F15 <= vk <= VK_F24:
+            target = int(ccos_hotkey_target[0])
+            if target:
+                is_up = bool(kb.flags & LLKHF_UP)
+                user32.PostMessageW(
+                    wintypes.HWND(target),
+                    WM_CCOS_FKEY,
+                    vk,
+                    1 if is_up else 0,
+                )
+                return 1
+        return int(
+            user32.CallNextHookEx(keyboard_ll_hook[0], n_code, w_param, l_param)
+        )
+
+    keyboard_ll_proc_keepalive[0] = HOOKPROC_LL(_ccos_ll_keyboard_hook)
+
+    def _inject_second_ghost_button_down(which: str) -> None:
+        if which == "left":
+            inject_mouse_left_down()
+        elif which == "right":
+            inject_mouse_right_down()
+        else:
+            inject_mouse_middle_down()
+
+    def _inject_second_ghost_button_up(which: str) -> None:
+        if which == "left":
+            inject_mouse_left_up()
+        elif which == "right":
+            inject_mouse_right_up()
+        else:
+            inject_mouse_middle_up()
+
+    def _finish_second_ghost_btn_drag() -> None:
+        if not second_ghost_btn_drag["active"]:
+            return
+        btn = second_ghost_btn_drag.get("button")
+        if isinstance(btn, str):
+            _inject_second_ghost_button_up(btn)
+        if second_ghost_btn_drag.get("merged_click"):
+            second_ghost_btn_drag["active"] = False
+            second_ghost_btn_drag["merged_click"] = False
+            second_ghost_btn_drag["saved"] = None
+            second_ghost_btn_drag["button"] = None
+            return
+        sav = second_ghost_btn_drag["saved"]
         if sav is not None:
             ax, ay = int(sav[0]), int(sav[1])
             ptr_state["p_pri"] = (ax, ay)
             user32.SetCursorPos(ax, ay)
-        second_left_drag["active"] = False
-        second_left_drag["saved"] = None
+        second_ghost_btn_drag["active"] = False
+        second_ghost_btn_drag["saved"] = None
+        second_ghost_btn_drag["button"] = None
         sync_secondary_overlay()
 
-    def second_left_btn_subclass(hw, msg, wparam, lparam):
-        old_p = ctypes.c_void_p(int(second_left_drag["old_proc"]))
+    def _second_ghost_btn_subclass_body(
+        hw: int,
+        msg: int,
+        wparam: int,
+        lparam: int,
+        idc_btn: int,
+        which: str,
+    ) -> int:
+        _op = second_ghost_btn_drag["old_proc"]
+        old_p = ctypes.c_void_p(int(_op[idc_btn]))
         if msg == WM_LBUTTONDOWN:
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             saved_pri = (int(pt.x), int(pt.y))
             ret = user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
-            ok = (
-                dual_enabled[0]
-                and ptr_state["p_sec"] is not None
-                and len(device_order) >= 2
-            )
-            if ok and not second_left_drag["active"]:
+            if second_ghost_btn_drag["active"]:
+                return ret
+            if not dual_enabled[0]:
+                _inject_second_ghost_button_down(which)
+                second_ghost_btn_drag["active"] = True
+                second_ghost_btn_drag["button"] = which
+                second_ghost_btn_drag["merged_click"] = True
+                second_ghost_btn_drag["saved"] = None
+                return ret
+            ok = ptr_state["p_sec"] is not None and len(device_order) >= 2
+            if ok:
                 sx, sy = ptr_state["p_sec"]
                 ix, iy = int(sx), int(sy)
                 user32.SetCursorPos(ix, iy)
                 ptr_state["p_pri"] = (ix, iy)
-                inject_mouse_left_down()
-                second_left_drag["active"] = True
-                second_left_drag["saved"] = saved_pri
+                _inject_second_ghost_button_down(which)
+                second_ghost_btn_drag["active"] = True
+                second_ghost_btn_drag["button"] = which
+                second_ghost_btn_drag["merged_click"] = False
+                second_ghost_btn_drag["saved"] = saved_pri
                 sync_secondary_overlay()
             return ret
         if msg == WM_LBUTTONUP:
-            if second_left_drag["active"]:
-                _finish_second_left_click_drag()
+            if second_ghost_btn_drag["active"]:
+                _finish_second_ghost_btn_drag()
             return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
         if msg == WM_CAPTURECHANGED:
-            if second_left_drag["active"]:
-                _finish_second_left_click_drag()
+            if second_ghost_btn_drag["active"]:
+                _finish_second_ghost_btn_drag()
             return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
         return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
 
-    second_left_btn_subclass_proc = WNDPROC(second_left_btn_subclass)
+    def _second_ghost_left_sub(hw, msg, wp, lp):
+        return _second_ghost_btn_subclass_body(hw, msg, wp, lp, IDC_SECOND_LEFT_CLICK, "left")
+
+    def _second_ghost_right_sub(hw, msg, wp, lp):
+        return _second_ghost_btn_subclass_body(hw, msg, wp, lp, IDC_SECOND_RIGHT_CLICK, "right")
+
+    def _second_ghost_middle_sub(hw, msg, wp, lp):
+        return _second_ghost_btn_subclass_body(hw, msg, wp, lp, IDC_SECOND_MIDDLE_CLICK, "middle")
+
+    second_ghost_left_sub_proc = WNDPROC(_second_ghost_left_sub)
+    second_ghost_right_sub_proc = WNDPROC(_second_ghost_right_sub)
+    second_ghost_middle_sub_proc = WNDPROC(_second_ghost_middle_sub)
+
+    tray_icon_alive: list[bool] = [False]
+
+    def _tray_set_tip_text(nid: NOTIFYICONDATAW, text: str) -> None:
+        buf = ctypes.create_unicode_buffer(text[:127], 128)
+        ctypes.memmove(
+            ctypes.addressof(nid.szTip),
+            buf,
+            128 * ctypes.sizeof(ctypes.c_wchar),
+        )
+
+    def tray_add(parent_hwnd: int) -> None:
+        if tray_icon_alive[0]:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = parent_hwnd
+        nid.uID = TRAY_ICON_ID
+        nid.uCallbackMessage = WM_TRAY_CALLBACK
+        hico = user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
+        if hico:
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+            nid.hIcon = hico
+        else:
+            nid.uFlags = NIF_MESSAGE | NIF_TIP
+        _tray_set_tip_text(nid, "CharaChorder Duo")
+        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            print("Shell_NotifyIconW(NIM_ADD) failed:", kernel32.GetLastError())
+            return
+        tray_icon_alive[0] = True
+
+    def tray_remove(parent_hwnd: int) -> None:
+        if not tray_icon_alive[0]:
+            return
+        nid = NOTIFYICONDATAW()
+        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        nid.hWnd = parent_hwnd
+        nid.uID = TRAY_ICON_ID
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+        tray_icon_alive[0] = False
+
+    def tray_restore_window(parent_hwnd: int) -> None:
+        user32.ShowWindow(parent_hwnd, SW_SHOW)
+        user32.ShowWindow(parent_hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(parent_hwnd)
+
+    def tray_show_context_menu(parent_hwnd: int) -> None:
+        hmenu = user32.CreatePopupMenu()
+        if not hmenu:
+            return
+        user32.AppendMenuW(
+            hmenu,
+            MF_STRING | MF_ENABLED,
+            IDM_TRAY_OPEN,
+            "Open CharaChorder Duo…",
+        )
+        user32.AppendMenuW(
+            hmenu,
+            MF_STRING | MF_ENABLED,
+            IDM_TRAY_EXIT,
+            "Exit",
+        )
+        user32.SetForegroundWindow(parent_hwnd)
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        user32.TrackPopupMenu(
+            hmenu,
+            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            int(pt.x),
+            int(pt.y),
+            0,
+            parent_hwnd,
+            None,
+        )
+        user32.DestroyMenu(hmenu)
 
     def wnd_proc(hwnd, msg, wparam, lparam):
         if msg == WM_GHOST_COLOR_SYNC:
@@ -3365,6 +3841,25 @@ def main() -> int:
                     refresh_ghost_rgb_label(hwnd)
                     apply_ghost_appearance(hwnd)
             return 0
+
+        if msg == WM_TRAY_CALLBACK:
+            ev = int(lparam) & 0xFFFF
+            if ev == WM_LBUTTONDBLCLK:
+                tray_restore_window(hwnd)
+                return 0
+            if ev == WM_RBUTTONUP:
+                tray_show_context_menu(hwnd)
+                return 0
+            return 0
+
+        if msg == WM_CLOSE:
+            user32.ShowWindow(hwnd, SW_HIDE)
+            return 0
+
+        if msg == WM_SYSCOMMAND:
+            if (int(wparam) & 0xFFF0) == SC_MINIMIZE:
+                user32.ShowWindow(hwnd, SW_HIDE)
+                return 0
 
         if msg == WM_TIMER and int(wparam) == SPLIT_SNAP_TIMER_ID:
             split_snap_anim_step()
@@ -3483,16 +3978,21 @@ def main() -> int:
                     None,
                 )
                 _ph_y += 24
-            _sl_btn = user32.GetDlgItem(hwnd, IDC_SECOND_LEFT_CLICK)
-            if _sl_btn:
-                second_left_drag["old_proc"] = int(
-                    user32.GetWindowLongPtrW(_sl_btn, GWLP_WNDPROC)
-                )
-                user32.SetWindowLongPtrW(
-                    _sl_btn,
-                    GWLP_WNDPROC,
-                    ctypes.cast(second_left_btn_subclass_proc, ctypes.c_void_p).value,
-                )
+            for _idc_sg, _proc_sg in (
+                (IDC_SECOND_LEFT_CLICK, second_ghost_left_sub_proc),
+                (IDC_SECOND_RIGHT_CLICK, second_ghost_right_sub_proc),
+                (IDC_SECOND_MIDDLE_CLICK, second_ghost_middle_sub_proc),
+            ):
+                _sg_btn = user32.GetDlgItem(hwnd, _idc_sg)
+                if _sg_btn:
+                    second_ghost_btn_drag["old_proc"][_idc_sg] = int(
+                        user32.GetWindowLongPtrW(_sg_btn, GWLP_WNDPROC)
+                    )
+                    user32.SetWindowLongPtrW(
+                        _sg_btn,
+                        GWLP_WNDPROC,
+                        ctypes.cast(_proc_sg, ctypes.c_void_p).value,
+                    )
             user32.CreateWindowExW(
                 0,
                 "STATIC",
@@ -4102,11 +4602,18 @@ def main() -> int:
             refresh_ring_animations_checkbox(hwnd)
             set_profile_combo_sel(hwnd, current_profile_idx[0])
             sync_secondary_overlay()
+            tray_add(hwnd)
             return 0
 
         if msg == WM_COMMAND:
             ctrl_id = wparam & 0xFFFF
             notify = (wparam >> 16) & 0xFFFF
+            if notify == 0 and ctrl_id == IDM_TRAY_OPEN:
+                tray_restore_window(hwnd)
+                return 0
+            if notify == 0 and ctrl_id == IDM_TRAY_EXIT:
+                user32.DestroyWindow(hwnd)
+                return 0
             if ctrl_id == IDC_TOGGLE_POINTERS and notify == BN_CLICKED:
                 tbtn = user32.GetDlgItem(hwnd, IDC_TOGGLE_POINTERS)
                 new_split = (
@@ -4141,23 +4648,16 @@ def main() -> int:
                 save_live_profile_to_slot(current_profile_idx[0])
                 return 0
             if ctrl_id == IDC_PIN_FIRST and notify == BN_CLICKED:
-                # Split only: remember primary screen point for merged Warp 1st; FX at that spot.
-                if not dual_enabled[0] or ptr_state["p_pri"] is None:
-                    return 0
-                px, py = ptr_state["p_pri"]
-                pinned_pri_warp_point[0] = (int(px), int(py))
-                merge_snap_anim_begin(hwnd, int(px), int(py))
+                pin_first_clicked(hwnd)
                 return 0
             if ctrl_id == IDC_PIN_SECOND and notify == BN_CLICKED:
-                # Split only: remember 2nd cursor screen point for merged Warp 2nd; FX at that spot.
-                if (
-                    not dual_enabled[0]
-                    or ptr_state["p_sec"] is None
-                ):
-                    return 0
-                sx, sy = ptr_state["p_sec"]
-                pinned_sec_warp_point[0] = (int(sx), int(sy))
-                merge_snap_anim_begin(hwnd, int(sx), int(sy))
+                pin_second_clicked(hwnd)
+                return 0
+            if ctrl_id == IDC_MERGE_WARP_FIRST and notify == BN_CLICKED:
+                warp_first_execute(hwnd)
+                return 0
+            if ctrl_id == IDC_MERGE_WARP_SECOND and notify == BN_CLICKED:
+                warp_second_execute(hwnd)
                 return 0
             _ph_i = PLACEHOLDER_TOGGLE_INDEX.get(ctrl_id)
             if _ph_i is not None and notify == BN_CLICKED:
@@ -4266,6 +4766,10 @@ def main() -> int:
                         gesture_sel[ctrl_id] = _gsel
                 return 0
 
+        if msg == WM_CCOS_FKEY:
+            dispatch_ccos_fkey(hwnd, int(wparam) & 0xFF, int(lparam) != 0)
+            return 0
+
         if msg == WM_INPUT:
             size = wintypes.UINT(0)
             user32.GetRawInputData(
@@ -4354,10 +4858,15 @@ def main() -> int:
                     ensure_pair_initialized()
                     if dev_id == sec:
                         ptr_state["p_sec"] = (vx, vy)
-                        if ptr_state["p_pri"] is not None:
+                        if second_ghost_btn_drag["active"]:
+                            ptr_state["p_pri"] = (vx, vy)
+                            user32.SetCursorPos(vx, vy)
+                        elif ptr_state["p_pri"] is not None:
                             px, py = ptr_state["p_pri"]
                             user32.SetCursorPos(px, py)
                     else:
+                        if second_ghost_btn_drag["active"] and sec is not None:
+                            return 0
                         ptr_state["p_pri"] = (vx, vy)
                         user32.SetCursorPos(vx, vy)
                     sync_secondary_overlay()
@@ -4421,10 +4930,15 @@ def main() -> int:
                     nx = clamp(nx, left, left + vw - 1)
                     ny = clamp(ny, top, top + vh - 1)
                     ptr_state["p_sec"] = (nx, ny)
-                    if ptr_state["p_pri"] is not None:
+                    if second_ghost_btn_drag["active"]:
+                        ptr_state["p_pri"] = (nx, ny)
+                        user32.SetCursorPos(nx, ny)
+                    elif ptr_state["p_pri"] is not None:
                         px, py = ptr_state["p_pri"]
                         user32.SetCursorPos(px, py)
                 else:
+                    if second_ghost_btn_drag["active"] and sec is not None:
+                        return 0
                     px, py = ptr_state["p_pri"]
                     nx, ny = px + dx, py + dy
                     nx = clamp(nx, left, left + vw - 1)
@@ -4458,7 +4972,13 @@ def main() -> int:
             return 0
 
         if msg == WM_DESTROY:
-            _finish_second_left_click_drag()
+            tray_remove(hwnd)
+            hh = keyboard_ll_hook[0]
+            if hh:
+                user32.UnhookWindowsHookEx(hh)
+                keyboard_ll_hook[0] = None
+            ccos_hotkey_target[0] = 0
+            _finish_second_ghost_btn_drag()
             split_snap_anim_cancel()
             _teardown_split_fx_layer(overlay_state)
             rb = red_divider_brush[0]
@@ -4562,6 +5082,19 @@ def main() -> int:
         print("CreateWindowExW failed:", kernel32.GetLastError())
         user32.DestroyWindow(ghost_hwnd)
         return 1
+
+    config_hwnd = int(hwnd)
+    ccos_hotkey_target[0] = config_hwnd
+    _hh = user32.SetWindowsHookExW(
+        WH_KEYBOARD_LL,
+        ctypes.cast(keyboard_ll_proc_keepalive[0], ctypes.c_void_p),
+        kernel32.GetModuleHandleW(None),
+        0,
+    )
+    if not _hh:
+        print("SetWindowsHookExW(WH_KEYBOARD_LL) failed:", kernel32.GetLastError())
+    else:
+        keyboard_ll_hook[0] = _hh
 
     msg = MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
