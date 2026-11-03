@@ -57,9 +57,10 @@ Top toggles
     split/merge and duo shift are checkboxes. Standard push buttons below them
     include merge/warp, pin, 2nd left/right/middle, and placeholder.
     “2nd Left/Right/Middle Click” share the same rules: in merged / merged-shift a
-    normal click at the system cursor; in split / split-shift warp to the ghost,
-    press the chosen button, track with the secondary mouse while held, release and
-    restore the primary. “placeholder” remains a stub control.
+    click at the system cursor (hold to drag via injected move events, not only
+    SetCursorPos); in split / split-shift warp to the ghost, press the chosen button,
+    track with the secondary mouse while held, release and restore the primary.
+    “placeholder” remains a stub control.
 
     F15–F24 are handled via a system-wide low-level keyboard hook: they mirror the
     same ten controls even when this window is not focused (other apps will not
@@ -453,6 +454,7 @@ def profile_idx_from_flags(split: bool, duo_shift_on: bool) -> int:
     return (1 if split else 0) + (2 if duo_shift_on else 0)
 
 
+MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
@@ -1145,6 +1147,19 @@ def inject_mouse_hwheel_delta(delta: int) -> None:
         0,
         0,
         dw_data,
+        ctypes.c_ulonglong(0),
+    )
+
+
+def inject_mouse_move_relative(dx: int, dy: int) -> None:
+    """Relative move in mickeys (same units as raw-input deltas after scaling)."""
+    if dx == 0 and dy == 0:
+        return
+    user32.mouse_event(
+        MOUSEEVENTF_MOVE,
+        int(dx),
+        int(dy),
+        0,
         ctypes.c_ulonglong(0),
     )
 
@@ -3723,6 +3738,7 @@ def main() -> int:
                 return ret
             if not dual_enabled[0]:
                 _inject_second_ghost_button_down(which)
+                user32.ReleaseCapture()
                 second_ghost_btn_drag["active"] = True
                 second_ghost_btn_drag["button"] = which
                 second_ghost_btn_drag["merged_click"] = True
@@ -3746,7 +3762,11 @@ def main() -> int:
                 _finish_second_ghost_btn_drag()
             return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
         if msg == WM_CAPTURECHANGED:
-            if second_ghost_btn_drag["active"]:
+            # Merged ghost drags release capture so the target app can move;
+            # do not treat that as cancel (shell drag takes capture from us).
+            if second_ghost_btn_drag["active"] and not second_ghost_btn_drag.get(
+                "merged_click"
+            ):
                 _finish_second_ghost_btn_drag()
             return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
         return user32.CallWindowProcW(old_p, hw, msg, wparam, lparam)
@@ -4883,9 +4903,25 @@ def main() -> int:
                     sync_secondary_overlay()
                     return 0
 
+                merged_ghost_drag = bool(
+                    second_ghost_btn_drag["active"]
+                    and second_ghost_btn_drag.get("merged_click")
+                )
+
+                def _apply_merged_abs_target(nx: int, ny: int) -> None:
+                    nx = clamp(nx, left, left + vw - 1)
+                    ny = clamp(ny, top, top + vh - 1)
+                    if merged_ghost_drag:
+                        pt = POINT()
+                        user32.GetCursorPos(ctypes.byref(pt))
+                        cx, cy = int(pt.x), int(pt.y)
+                        inject_mouse_move_relative(nx - cx, ny - cy)
+                    else:
+                        user32.SetCursorPos(nx, ny)
+                    ptr_state["p_pri"] = (nx, ny)
+
                 if sec is None:
-                    ptr_state["p_pri"] = (vx, vy)
-                    user32.SetCursorPos(vx, vy)
+                    _apply_merged_abs_target(vx, vy)
                     return 0
                 if dev_id == sec:
                     pc = move_sensitivity_pct(False, True)
@@ -4894,13 +4930,9 @@ def main() -> int:
                     cx, cy = int(pt.x), int(pt.y)
                     nx = int(round(cx + (vx - cx) * pc / 100.0))
                     ny = int(round(cy + (vy - cy) * pc / 100.0))
-                    nx = clamp(nx, left, left + vw - 1)
-                    ny = clamp(ny, top, top + vh - 1)
-                    ptr_state["p_pri"] = (nx, ny)
-                    user32.SetCursorPos(nx, ny)
+                    _apply_merged_abs_target(nx, ny)
                 else:
-                    ptr_state["p_pri"] = (vx, vy)
-                    user32.SetCursorPos(vx, vy)
+                    _apply_merged_abs_target(vx, vy)
                 return 0
 
             dx, dy = mouse.lLastX, mouse.lLastY
@@ -4959,27 +4991,33 @@ def main() -> int:
                 sync_secondary_overlay()
                 return 0
 
+            merged_ghost_drag = bool(
+                second_ghost_btn_drag["active"]
+                and second_ghost_btn_drag.get("merged_click")
+            )
+
+            def _apply_merged_rel_delta(adx: int, ady: int) -> None:
+                ensure_merged_cursor_initialized()
+                px, py = ptr_state["p_pri"]
+                nx, ny = px + adx, py + ady
+                nx = clamp(nx, left, left + vw - 1)
+                ny = clamp(ny, top, top + vh - 1)
+                adx, ady = nx - px, ny - py
+                if merged_ghost_drag:
+                    inject_mouse_move_relative(adx, ady)
+                else:
+                    user32.SetCursorPos(nx, ny)
+                ptr_state["p_pri"] = (nx, ny)
+
             if sec is None:
                 pc = move_sensitivity_pct(False, False)
                 dx, dy = scale_mouse_delta_xy(dx, dy, pc)
-                ensure_merged_cursor_initialized()
-                px, py = ptr_state["p_pri"]
-                nx, ny = px + dx, py + dy
-                nx = clamp(nx, left, left + vw - 1)
-                ny = clamp(ny, top, top + vh - 1)
-                ptr_state["p_pri"] = (nx, ny)
-                user32.SetCursorPos(nx, ny)
+                _apply_merged_rel_delta(dx, dy)
                 return 0
 
-            ensure_merged_cursor_initialized()
             pc = move_sensitivity_pct(False, dev_id == sec)
             dx, dy = scale_mouse_delta_xy(dx, dy, pc)
-            px, py = ptr_state["p_pri"]
-            nx, ny = px + dx, py + dy
-            nx = clamp(nx, left, left + vw - 1)
-            ny = clamp(ny, top, top + vh - 1)
-            ptr_state["p_pri"] = (nx, ny)
-            user32.SetCursorPos(nx, ny)
+            _apply_merged_rel_delta(dx, dy)
             return 0
 
         if msg == WM_DESTROY:
