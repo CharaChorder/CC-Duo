@@ -55,11 +55,11 @@ Sensitivity
 
 Top toggles
     split/merge and duo shift are checkboxes. Standard push buttons below them
-    include merge/warp, pin, 2nd left/right/middle, and ultimate (placeholder).
+    include merge/warp, pin, 2nd left/right/middle, and placeholder.
     “2nd Left/Right/Middle Click” share the same rules: in merged / merged-shift a
     normal click at the system cursor; in split / split-shift warp to the ghost,
     press the chosen button, track with the secondary mouse while held, release and
-    restore the primary. “ultimate” remains a placeholder.
+    restore the primary. “placeholder” remains a stub control.
 
     F15–F24 are handled via a system-wide low-level keyboard hook: they mirror the
     same ten controls even when this window is not focused (other apps will not
@@ -238,6 +238,15 @@ CCOS_FKEY_CHECKBOX_IDCS: frozenset[int] = frozenset(
 CCOS_FKEY_SECOND_GHOST_BTN_IDCS: frozenset[int] = frozenset(
     (IDC_SECOND_LEFT_CLICK, IDC_SECOND_RIGHT_CLICK, IDC_SECOND_MIDDLE_CLICK)
 )
+
+
+def ccos_input_label(base: str, idc: int) -> str:
+    """CCOS Inputs control caption with matching F-key hint, e.g. pin 1st (f19)."""
+    for vk, mapped_idc in CCOS_FKEY_TO_IDC.items():
+        if mapped_idc == idc:
+            return f"{base} (f{vk - VK_F15 + 15})"
+    return base
+
 
 PLACEHOLDER_TOGGLE_IDCS: tuple[int, ...] = (IDC_ULTIMATE_TOGGLE,)
 PLACEHOLDER_TOGGLE_INDEX: dict[int, int] = {
@@ -3189,7 +3198,9 @@ def main() -> int:
         """Checked = split (2nd cursor); unchecked = merged (single cursor)."""
         btn = user32.GetDlgItem(parent_hwnd, IDC_TOGGLE_POINTERS)
         if btn:
-            user32.SetWindowTextW(btn, "split/merge")
+            user32.SetWindowTextW(
+                btn, ccos_input_label("split/merge", IDC_TOGGLE_POINTERS)
+            )
             user32.SendMessageW(
                 btn,
                 BM_SETCHECK,
@@ -3904,7 +3915,7 @@ def main() -> int:
             user32.CreateWindowExW(
                 0,
                 "BUTTON",
-                "split/merge",
+                ccos_input_label("split/merge", IDC_TOGGLE_POINTERS),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 18,
                 26,
@@ -3918,7 +3929,7 @@ def main() -> int:
             user32.CreateWindowExW(
                 0,
                 "BUTTON",
-                "duo shift",
+                ccos_input_label("duo shift", IDC_DUO_SHIFT_TOGGLE),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 230,
                 26,
@@ -3944,7 +3955,7 @@ def main() -> int:
                 ),
                 (
                     (IDC_SECOND_MIDDLE_CLICK, "2nd Middle Click"),
-                    (IDC_ULTIMATE_TOGGLE, "ultimate"),
+                    (IDC_ULTIMATE_TOGGLE, "placeholder"),
                 ),
             )
             _ph_y = 50
@@ -3952,7 +3963,7 @@ def main() -> int:
                 user32.CreateWindowExW(
                     0,
                     "BUTTON",
-                    _ph_row[0][1],
+                    ccos_input_label(_ph_row[0][1], _ph_row[0][0]),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                     18,
                     _ph_y,
@@ -3966,7 +3977,7 @@ def main() -> int:
                 user32.CreateWindowExW(
                     0,
                     "BUTTON",
-                    _ph_row[1][1],
+                    ccos_input_label(_ph_row[1][1], _ph_row[1][0]),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                     230,
                     _ph_y,
