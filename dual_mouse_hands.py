@@ -15,7 +15,7 @@ Modes
 
 Profiles
     Four presets: merged, split, merged shift, split shift. Each stores its own
-    move %, scroll/zoom/tab strength %, and gesture mappings. The profile combo
+    move %, scroll/zoom/volume/tab strength %, and gesture mappings. The profile combo
     and the split/merge + duo shift checkboxes stay in sync.
 
 Gestures
@@ -41,8 +41,9 @@ Gestures
 Sensitivity
     Per profile: primary vs 2nd-device move % (merged and merged-shift profiles
     default the 2nd device to 50%; split profiles default both to 100%), plus
-    separate strength % for vertical scroll, horizontal scroll, zoom, tab (40
-    default), and change-application (also scales Win+D show-desktop gestures).
+    separate strength % for vertical scroll, horizontal scroll, zoom, volume (40
+    default), tab (40 default), and change-application (also scales Win+D
+    show-desktop gestures).
     Gesture axis tightness (%) controls how closely each mouse’s motion must
     align with N/S vs E/W before dual-mice gestures can arm (150 default, 600 on
     the split profile only; higher = stricter). The same ratio applies to orthogonal
@@ -219,6 +220,7 @@ IDC_GESTURE_WEST_NORTH = 1042
 IDC_GESTURE_WEST_SOUTH = 1043
 IDC_SENS_PROFILE_GESTURE_COOLDOWN_EDIT = 1044
 IDC_RING_ANIMATIONS_TOGGLE = 1045
+IDC_SENS_VOLUME_EDIT = 1046
 
 # CCOS Inputs group: F15–F24 when the main window or a child has focus.
 CCOS_FKEY_TO_IDC: dict[int, int] = {
@@ -259,6 +261,7 @@ DEFAULT_SENSITIVITY_PCT = 100
 DEFAULT_MERGED_SECONDARY_PCT = 50
 DEFAULT_SCROLL_PCT = 300
 DEFAULT_TAB_PCT = 40
+DEFAULT_VOLUME_PCT = 40
 DEFAULT_CHANGE_APP_PCT = 50
 DEFAULT_GESTURE_AIM_PCT = 150
 MIN_SENSITIVITY_PCT = 1
@@ -322,6 +325,7 @@ def default_input_sensitivity_dict() -> dict[str, int]:
         "scroll_pct": DEFAULT_SCROLL_PCT,
         "scroll_horizontal_pct": DEFAULT_SCROLL_PCT,
         "zoom_pct": DEFAULT_SCROLL_PCT,
+        "volume_pct": DEFAULT_VOLUME_PCT,
         "tab_pct": DEFAULT_TAB_PCT,
         "change_app_pct": DEFAULT_CHANGE_APP_PCT,
         "gesture_aim_pct": DEFAULT_GESTURE_AIM_PCT,
@@ -363,6 +367,7 @@ def migrate_input_sensitivity_dict(d: dict[str, int]) -> None:
                 )
             )
         )
+        d.setdefault("volume_pct", DEFAULT_VOLUME_PCT)
         return
     mp = int(
         d.get(
@@ -396,6 +401,7 @@ def migrate_input_sensitivity_dict(d: dict[str, int]) -> None:
             )
         )
     )
+    d.setdefault("volume_pct", DEFAULT_VOLUME_PCT)
 
 
 def default_gesture_selections() -> dict[int, int]:
@@ -2196,7 +2202,7 @@ def main() -> int:
         "pri_t": 0.0,
         "sec_t": 0.0,
     }
-    # Signed volume step demand; drained with media key taps (vertical scroll %).
+    # Signed volume step demand; drained with media key taps (volume strength %).
     dual_volume: dict[str, float] = {
         "accum": 0.0,
     }
@@ -2240,7 +2246,7 @@ def main() -> int:
     WHEEL_ACCUM_GAIN = 0.52
     WHEEL_ACCUM_DECAY = 0.68
     WHEEL_ACCUM_CAP = 520.0
-    VOLUME_ACCUM_CHUNK = 38
+    VOLUME_ACCUM_CHUNK = 48
     VOLUME_ACCUM_MAX_BURST = 10
     TAB_ACCUM_CHUNK = 100
     TAB_ACCUM_MAX_BURST = 3
@@ -2404,9 +2410,16 @@ def main() -> int:
         )
         mag_zo = float(min(abs(pdx_zo), abs(sdx_zo))) if zo_synced else 0.0
 
-        spct_v = float(
+        spct_scroll = float(
             clamp(
                 int(input_sensitivity.get("scroll_pct", DEFAULT_SCROLL_PCT)),
+                MIN_SENSITIVITY_PCT,
+                MAX_SENSITIVITY_PCT,
+            )
+        )
+        spct_vol = float(
+            clamp(
+                int(input_sensitivity.get("volume_pct", DEFAULT_VOLUME_PCT)),
                 MIN_SENSITIVITY_PCT,
                 MAX_SENSITIVITY_PCT,
             )
@@ -2447,7 +2460,8 @@ def main() -> int:
                 MAX_SENSITIVITY_PCT,
             )
         )
-        gain_v = spct_v / 100.0 * WHEEL_ACCUM_GAIN
+        gain_scroll = spct_scroll / 100.0 * WHEEL_ACCUM_GAIN
+        gain_vol = spct_vol / 100.0 * WHEEL_ACCUM_GAIN
         gain_h = spct_h / 100.0 * WHEEL_ACCUM_GAIN
         gain_z = spct_z / 100.0 * WHEEL_ACCUM_GAIN
         gain_tab = spct_tab / 100.0 * WHEEL_ACCUM_GAIN
@@ -2471,10 +2485,10 @@ def main() -> int:
             if action == 0 or mag <= 0:
                 return
             if action == GESTURE_SCROLL_NORTH_ITEM:
-                st_v["wheel_accum"] = float(st_v["wheel_accum"]) - mag * gain_v
+                st_v["wheel_accum"] = float(st_v["wheel_accum"]) - mag * gain_scroll
                 used_v = True
             elif action == GESTURE_SCROLL_SOUTH_ITEM:
-                st_v["wheel_accum"] = float(st_v["wheel_accum"]) + mag * gain_v
+                st_v["wheel_accum"] = float(st_v["wheel_accum"]) + mag * gain_scroll
                 used_v = True
             elif action == GESTURE_SCROLL_WEST_ITEM:
                 st_hscr["wheel_accum"] = float(st_hscr["wheel_accum"]) - mag * gain_h
@@ -2491,10 +2505,10 @@ def main() -> int:
                 st_zo["wheel_accum"] = max(0.0, min(WHEEL_ACCUM_CAP, nz))
                 used_zo = True
             elif action == GESTURE_VOLUME_UP_ITEM:
-                st_vol["accum"] = float(st_vol["accum"]) + mag * gain_v
+                st_vol["accum"] = float(st_vol["accum"]) + mag * gain_vol
                 used_vol = True
             elif action == GESTURE_VOLUME_DOWN_ITEM:
-                st_vol["accum"] = float(st_vol["accum"]) - mag * gain_v
+                st_vol["accum"] = float(st_vol["accum"]) - mag * gain_vol
                 used_vol = True
             elif action == GESTURE_TAB_RIGHT_ITEM:
                 st_tab["right_accum"] = float(st_tab["right_accum"]) + mag * gain_tab
@@ -3387,6 +3401,7 @@ def main() -> int:
                 DEFAULT_SCROLL_PCT,
             ),
             (IDC_SENS_ZOOM_EDIT, "zoom_pct", DEFAULT_SCROLL_PCT),
+            (IDC_SENS_VOLUME_EDIT, "volume_pct", DEFAULT_VOLUME_PCT),
             (IDC_SENS_TAB_EDIT, "tab_pct", DEFAULT_TAB_PCT),
             (
                 IDC_SENS_CHANGE_APP_EDIT,
@@ -4342,10 +4357,42 @@ def main() -> int:
             user32.CreateWindowExW(
                 0,
                 "STATIC",
-                "Tab strength (Ctrl+Tab / Ctrl+Shift+Tab, %):",
+                "Volume strength (media keys, %):",
                 WS_CHILD | WS_VISIBLE,
                 18,
                 374,
+                400,
+                16,
+                hwnd,
+                None,
+                hinst,
+                None,
+            )
+            user32.CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                "EDIT",
+                str(DEFAULT_VOLUME_PCT),
+                WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | ES_AUTOHSCROLL
+                | ES_NUMBER,
+                218,
+                370,
+                52,
+                22,
+                hwnd,
+                ctypes.c_void_p(IDC_SENS_VOLUME_EDIT),
+                hinst,
+                None,
+            )
+            user32.CreateWindowExW(
+                0,
+                "STATIC",
+                "Tab strength (Ctrl+Tab / Ctrl+Shift+Tab, %):",
+                WS_CHILD | WS_VISIBLE,
+                18,
+                396,
                 400,
                 16,
                 hwnd,
@@ -4363,7 +4410,7 @@ def main() -> int:
                 | ES_AUTOHSCROLL
                 | ES_NUMBER,
                 218,
-                370,
+                392,
                 52,
                 22,
                 hwnd,
@@ -4377,7 +4424,7 @@ def main() -> int:
                 "Change application (Win+Tab) strength (%):",
                 WS_CHILD | WS_VISIBLE,
                 18,
-                396,
+                418,
                 400,
                 16,
                 hwnd,
@@ -4395,7 +4442,7 @@ def main() -> int:
                 | ES_AUTOHSCROLL
                 | ES_NUMBER,
                 218,
-                392,
+                414,
                 52,
                 22,
                 hwnd,
@@ -4409,7 +4456,7 @@ def main() -> int:
                 "ring animations",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 18,
-                416,
+                438,
                 424,
                 22,
                 hwnd,
@@ -4423,7 +4470,7 @@ def main() -> int:
                 "Gesture axis tightness (1–250000 %, 150 default; max ≈ off):",
                 WS_CHILD | WS_VISIBLE,
                 18,
-                442,
+                464,
                 400,
                 16,
                 hwnd,
@@ -4441,7 +4488,7 @@ def main() -> int:
                 | ES_AUTOHSCROLL
                 | ES_NUMBER,
                 218,
-                438,
+                460,
                 52,
                 22,
                 hwnd,
@@ -4455,7 +4502,7 @@ def main() -> int:
                 "After profile change, block gestures (ms, 0 = off, default 5):",
                 WS_CHILD | WS_VISIBLE,
                 18,
-                468,
+                490,
                 400,
                 16,
                 hwnd,
@@ -4473,7 +4520,7 @@ def main() -> int:
                 | ES_AUTOHSCROLL
                 | ES_NUMBER,
                 218,
-                464,
+                486,
                 52,
                 22,
                 hwnd,
@@ -4487,7 +4534,7 @@ def main() -> int:
                 "Gestures:",
                 WS_CHILD | WS_VISIBLE,
                 18,
-                498,
+                520,
                 424,
                 14,
                 hwnd,
@@ -4534,7 +4581,7 @@ def main() -> int:
             _gcw = 200
             _gch = 36
             _gtitle = 13
-            _gy = 516
+            _gy = 538
             for _row in _gesture_rows:
                 user32.CreateWindowExW(
                     0,
@@ -4756,6 +4803,9 @@ def main() -> int:
                     return 0
                 if ctrl_id == IDC_SENS_ZOOM_EDIT:
                     normalize_sensitivity_edit(hwnd, ctrl_id, "zoom_pct")
+                    return 0
+                if ctrl_id == IDC_SENS_VOLUME_EDIT:
+                    normalize_sensitivity_edit(hwnd, ctrl_id, "volume_pct")
                     return 0
                 if ctrl_id == IDC_SENS_TAB_EDIT:
                     normalize_sensitivity_edit(hwnd, ctrl_id, "tab_pct")
